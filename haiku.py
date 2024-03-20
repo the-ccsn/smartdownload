@@ -1,89 +1,124 @@
-import requests
+import json
 import os
+import requests
 import datetime
 import time
+import random
+import base64
+import cv2
+import pytesseract
+import tkinter as tk
+from tkinter import simpledialog
 
-# Login
-url = "https://buct.smartclass.cn/Login.aspx"
-response = requests.get(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"})
-resp_cookies = response.cookies
+def login():
+    # 获取验证码
+    response = requests.get("https://buct.smartclass.cn/Login.aspx", headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"})
+    cookies = response.cookies.get_dict()
+    verifycode_json = json.loads(response.text)
 
-# Get verification code
-random_num = int(str(int(time.time() * 1000000000)) * 0.0000001)
-verify_code_url = f"https://buct.smartclass.cn/home/VerifyImage2?{random_num}"
-response = requests.get(verify_code_url, cookies=resp_cookies, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"})
-verify_code_json = response.text
-verify_code_img = response.content.decode("base64")
-verify_code = input("Input verification code: ")
+    # 显示验证码图片
+    verifyimg = base64.b64decode(verifycode_json["Value"]["img"])
+    with open("verifyimg.png", "wb") as f:
+        f.write(verifyimg)
+    image = cv2.imread("verifyimg.png")
+    cv2.imshow("Verification Code", image)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
-# Login
-login_url = "https://buct.smartclass.cn/Home/Login"
-login_data = {
-    "UserName": "",
-    "PassWord": "",
-    "isRember": "false",
-    "VerifyCode": verify_code,
-    "VerifyCodeId": verify_code_json["Code"],
-    "redirectUri": ""
-}
-response = requests.post(login_url, data=login_data, cookies=resp_cookies, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"})
-login_return = response.text
+    # 输入验证码
+    verifycode = pytesseract.image_to_string(image).strip()
+    if not verifycode:
+        verifycode = simpledialog.askstring("Input Code", "Please enter the verification code:")
 
-# Get CSRF token
-wechat_url = "https://buct.smartclass.cn/wechat.json?r=2021-01-29"
-response = requests.get(wechat_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"})
-wechat_json = response.text
-csrf_key = wechat_json["csrkKey"]
-token = "".join([csrf_key[int((time.time() - time.time() % i) / i)] for i in [1000000000000, 100000000000, 10000000000, 1000000000, 100000000, 10000000, 1000000, 100000, 10000, 1000, 100, 10]])
+    # 登录
+    login_data = {
+        "UserName": "",
+        "PassWord": "",
+        "isRember": "false",
+        "VerifyCode": verifycode,
+        "VerifyCodeId": verifycode_json["Value"]["Code"],
+        "redirectUri": ""
+    }
+    response = requests.post("https://buct.smartclass.cn/Home/Login", data=login_data, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"}, cookies=cookies)
+    cookies.update(response.cookies.get_dict())
+    return cookies
 
-# Get video list
-today = (datetime.datetime.now() - datetime.timedelta(days=36)).strftime("%Y-%m-%d")
-from_day = (datetime.datetime.now() - datetime.timedelta(days=14)).strftime("%Y-%m-%d")
-video_list_url = f"https://buct.smartclass.cn/Webapi/V1/Video/GetMyVideoList?csrkToken={token}&TeacherName=&Sort=StartTime&TagID=&SyCommonKey=&StartDate={from_day}&EndDate={today}&Order=1&PageSize=100&PageNumber=1&attribute=&IncludePublic="
-response = requests.get(video_list_url, cookies=resp_cookies, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"})
-video_list = response.text
-covers = [item.split("?")[0] for item in response.json()["Data"]["Cover"]]
-start_times = response.json()["Data"]["StartTime"]
-total_count = response.json()["TotalCount"]
-course_names = response.json()["Data"]["CourseName"]
+def get_csrf_token(cookies):
+    # 获取 CSRF 令牌
+    response = requests.get("https://buct.smartclass.cn/wechat.json?r=2021-01-29", headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"}, cookies=cookies)
+    csrkKey = json.loads(response.text)["csrkKey"]
+    token = "".join(csrkKey[int((time.time() - time.time() % (10 ** i)) / (10 ** i))] for i in range(10, 0, -1))
+    return token
 
-# Process video list
-output_vga = ["#EXTM3U"]
-output_video1 = ["#EXTM3U"]
-for i in range(total_count):
-    cover = covers[i]
-    start_time = start_times[i].replace(":", "_")
-    course_name = course_names[i]
+def download_videos(cookies, token):
+    # 获取课程列表
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    fromday = (datetime.datetime.now() - datetime.timedelta(days=36)).strftime("%Y-%m-%d")
+    response = requests.get(f"https://buct.smartclass.cn/Webapi/V1/Video/GetMyVideoList?csrkToken={token}&TeacherName=&Sort=StartTime&TagID=&SyCommonKey=&StartDate={fromday}&EndDate={today}&Order=1&PageSize=100&PageNumber=1&attribute=&IncludePublic=", headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"}, cookies=cookies)
+    video_data = json.loads(response.text)
 
-    vga_path = f"D:\\OvlerDrive\\OneDrive\\downloads\\{course_name}\\{start_time}_VGA.mp4"
-    if not os.path.exists(vga_path):
-        response = requests.post("http://localhost:16800/jsonrpc", json={
-            "jsonrpc": "2.0",
-            "method": "aria2.addUri",
-            "id": "QXJpYU5nXzE2NDY4MzM4NDJfMC4zNDc3MTcxOTgzNTA1NDQ1",
-            "params": [[cover.replace("000.jpg", "VGA.mp4")], {"out": f"{course_name}/{start_time}_VGA.mp4"}]
-        })
+    # 下载视频
+    total_count = video_data["TotalCount"]
+    for i in range(total_count):
+        cover = video_data["Data"][i]["Cover"]
+        start_time = video_data["Data"][i]["StartTime"]
+        course_name = video_data["Data"][i]["CourseName"]
+        start_time_formatted = start_time.replace(":", "_")
 
-    video1_path = f"D:\\OvlerDrive\\OneDrive\\downloads\\{course_name}\\Video1\\{start_time}_Video1.mp4"
-    if not os.path.exists(video1_path):
-        response = requests.post("http://localhost:16800/jsonrpc", json={
-            "jsonrpc": "2.0",
-            "method": "aria2.addUri",
-            "id": "QXJpYU5nXzE2NDY4MzM4NDJfMC4zNDc3MTcxOTgzNTA1NDQ1",
-            "params": [[cover.replace("000.jpg", "Video1.mp4")], {"out": f"{course_name}/Video1/{start_time}_Video1.mp4"}]
-        })
+        # 下载 VGA 视频
+        vga_url = cover.replace("/1/", "/0/").replace("000.jpg", "VGA.mp4")
+        if not os.path.exists(f"D:\\OvlerDrive\\OneDrive\\downloads\\{course_name}\\{start_time_formatted}_VGA.mp4"):
+            response = requests.get(vga_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.113 Safari/537.36"}, cookies=cookies)
+            with open(f"D:\\OvlerDrive\\OneDrive\\downloads\\{course_name}\\{start_time_formatted}_VGA.mp4", "wb") as f:
+                f.write(response.content)
 
-    if cover.replace("000.jpg", "VGA.mp4") not in output_vga:
-        output_vga.append(f"#EXTINF:-1,{course_name}_vga")
-        output_vga.append(cover.replace("000.jpg", "VGA.mp4"))
-    if cover.replace("000.jpg", "Video1.mp4") not in output_video1:
-        output_video1.append(f"#EXTINF:-1,{course_name}_video1")
-        output_video1.append(cover.replace("000.jpg", "Video1.mp4"))
-    time.sleep(0.1)
+        # 下载 Video1 视频
+        video1_url = cover.replace("/1/", "/0/").replace("000.jpg", "Video1.mp4")
+        if not os.path.exists(f"D:\\OvlerDrive\\OneDrive\\downloads\\{course_name}\\Video1\\{start_time_formatted}_Video1.mp4"):
+            response = requests.get(video1_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.113 Safari/537.36"}, cookies=cookies)
+            if not os.path.exists(f"D:\\OvlerDrive\\OneDrive\\downloads\\{course_name}\\Video1"):
+                os.makedirs(f"D:\\OvlerDrive\\OneDrive\\downloads\\{course_name}\\Video1")
+            with open(f"D:\\OvlerDrive\\OneDrive\\downloads\\{course_name}\\Video1\\{start_time_formatted}_Video1.mp4", "wb") as f:
+                f.write(response.content)
+        time.sleep(0.1)
 
-# Save playlists
-with open("E:\\Video\\smartclass\\vga.m3u", "w", encoding="utf-8") as f:
-    f.write("\n".join(output_vga))
+def get_live_streams(cookies, token):
+    # 获取直播列表
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    fromday = (datetime.datetime.now() + datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+    response = requests.get(f"https://buct.smartclass.cn/Webapi/V1/Live/GetMyLiveList?csrkToken={token}&MajorUserID=&ClassroomID=&Sort=IsLiving%20desc%2CIsCompleted%2CStartTime&StartDate={today}&EndDate={fromday}&PageSize=50&PageNumber=1&attribute=&IncludePublic=true", headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"}, cookies=cookies)
+    live_data = json.loads(response.text)
 
-with open("E:\\Video\\smartclass\\video1.m3u", "w", encoding="utf-8") as f:
-    f.write("\n".join(output_video1))
+    # 获取直播流信息
+    total_count = live_data["TotalCount"]
+    page2read = int(total_count * 0.02 + 1)
+    vga_output = ["#EXTM3U"]
+    for page in range(1, page2read + 1):
+        response = requests.get(f"https://buct.smartclass.cn/Webapi/V1/Live/GetMyLiveList?csrkToken={token}&MajorUserID=&ClassroomID=&Sort=IsLiving%20desc%2CIsCompleted%2CStartTime&StartDate={today}&EndDate={fromday}&PageSize=50&PageNumber={page}&attribute=&IncludePublic=true", headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"}, cookies=cookies)
+        live_data = json.loads(response.text)
+        for i in range(live_data["TotalCount"]):
+            schedule_id = live_data["Data"][i]["ScheduleID"]
+            title = live_data["Data"][i]["Title"]
+            response = requests.post("https://buct.smartclass.cn/Live/GetLiveStreamInfo", data={"ScheduleId": schedule_id}, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.113 Safari/537.36"}, cookies=cookies)
+            stream_data = json.loads(response.text)
+            vga = stream_data["Value"]["LanLiveMainRtmpSourceStreamNames"][0]
+            video1 = stream_data["Value"]["LanLiveMainRtmpSourceStreamNames"][1]
+            if vga and vga not in vga_output:
+                vga_output.append(f"#EXTINF:-1,{title}_vga")
+                vga_output.append(vga)
+            if video1 and video1 not in vga_output:
+                vga_output.append(f"#EXTINF:-1,{title}_video1")
+                vga_output.append(video1)
+        time.sleep(0.1)
+
+    with open("vga.m3u", "w", encoding="utf-8") as f:
+        f.write("\n".join(vga_output))
+
+def main():
+    cookies = login()
+    token = get_csrf_token(cookies)
+    download_videos(cookies, token)
+    get_live_streams(cookies, token)
+
+if __name__ == "__main__":
+    main()
