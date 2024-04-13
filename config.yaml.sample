@@ -1,0 +1,11 @@
+PowerCreatorCMSAuthenticationID: 
+aria2_host: http://localhost
+aria2_port: 16800
+aria2_secret: null
+base_dir: 
+platform_token: 
+website_url: https://ovler-young.github.io/hyperaudio-lite/test.html
+base_urls_in: 
+base_urls_out: 
+username: 
+password: 
